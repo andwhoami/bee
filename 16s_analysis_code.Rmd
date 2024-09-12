@@ -1,0 +1,800 @@
+
+```{r}
+colors <- c("#0FA3B1", "#B5E2FA","#BCD0AC", "#EDDEA4","#F2BF8B","#F7A072", "#B4C7BF")
+theme_set(theme_bw())
+```
+
+
+# function
+
+```{r}
+b_div <- function(data, var1, var2) {
+  #livv <- data
+  livv <- microbiome::transform(data, "clr")  #Change the argument
+
+  erie_bray <- phyloseq::distance(livv, method = "euclidean")
+  #Make dataframe from sample data
+  sampledf <- data.frame(sample_data(data))
+  
+  #Count the homogeneous of variances (pv > 0.05 needed)
+  beta <- betadisper(erie_bray, var1) #Change the argument
+  permutest(beta)
+  
+  #Count permanova (pv < 0.01 needed)
+    permanova <- adonis2(erie_bray ~ var1, data = sampledf) #Change the argument
+  permanova
+  
+  #Calculate the ordination
+  ord.nmds.bray <- ordinate(livv, method="PCoA", distance="euclidean") #Change the arguments (method and distance)
+  ?plot_ordination
+  #Plot ordination
+  plot_ordination_phyloseq <- plot_ordination(livv, ord.nmds.bray,
+                                              color=var2,
+                                              title="Euclidean PCoA") +
+    stat_ellipse(geom = "polygon", type="norm", alpha=0.01,
+                 aes(fill=var2)) +
+    scale_color_manual(values = colors)
+  plot_ordination_phyloseq
+  return(list(plot_ordination_phyloseq,permanova, permutest(beta)))
+  # return(plot_ordination_phyloseq=plot_ordination_phyloseq,
+  #        permanova=permanova,
+  #        beta = permutest(beta))
+}
+?plot_ordination
+```
+
+
+```{r}
+setwd("/Users/aleksandrakozlova/Desktop/Work/Kurchatnik/Projects/Ossetian.bees/article_fin/")
+```
+
+```{r}
+path <- "data/Ossetian.bees/16S/"
+list.files(path)
+```
+
+```{r}
+fnFs <- sort(list.files(path, pattern="R1.fastq.gz", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="R2.fastq.gz", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+
+```{r}
+plotQualityProfile(fnFs[1:10])
+plotQualityProfile(fnRs[1:10])
+```
+
+```{r}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(130,130),
+              maxN=0, maxEE=0.5, truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE) # On Windows set multithread=FALSE
+ out
+```
+
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, minOverlap=9, verbose=TRUE)
+?mergePairs
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+```
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+
+```{r}
+write.csv(seqtab.nochim,"seqtab_1.csv", row.names = FALSE)
+seqtab.nochim.mer1 <- seqtab.nochim
+saveRDS(seqtab.nochim, "seqtab_1.rds") 
+#sample.metadata.mer <- read.csv(file = 'seqtab.nochim.mer.csv',
+ #                                       dec = ",",
+ #                                       header = TRUE, row.names = 1) 
+seqtab.nochim <- readRDS("seqtab_1.rds")
+```
+
+```{r}
+taxa.mer <- assignTaxonomy(seqtab.nochim, "../../../database/silva_nr99_v138.1_train_set.fa.gz", multithread=TRUE)
+taxa.mer <- addSpecies(taxa.mer, "../../../database/silva_species_assignment_v138.1.fa.gz")
+taxa.print <- taxa.mer # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+
+
+```{r}
+meta <- sample_data(read.csv(file = 'Bee_rep_ph.csv',
+                                        dec = ",",
+                                        header = TRUE,
+                                        row.names = 1 ) )
+
+rownames(meta) <- gsub("Osetia.", "", rownames(meta))
+rownames(meta) <- gsub("repl", "16S.repl", rownames(meta))
+rownames(meta) <- gsub(".fastq", ".fastq.gz", rownames(meta))
+
+```
+
+Connect Silva taxonomy to phyloseq (4 export only) and making count table with asv's rows and bee's columns
+```{r}
+ps.Silva.mer <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE),
+                     tax_table(taxa.mer), meta)
+dna <- Biostrings::DNAStringSet(taxa_names(ps.Silva.mer))
+names(dna) <- taxa_names(ps.Silva.mer)
+ps.Silva.mer <- merge_phyloseq(ps.Silva.mer, dna)
+taxa_names(ps.Silva.mer) <- sprintf("ASV_%04d", seq(ntaxa(ps.Silva.mer)))
+```
+
+save this phyloseq to rds format (for faster work and no need to assign taxonomy again and other things!)
+```{r}
+saveRDS(ps.Silva.mer, "ps.mer2.rds")
+ps.Silva.mer <- readRDS("ps.mer2.rds")
+```
+
+#data for sharing with other! and importing anything
+
+absolut counting
+```{r}
+readcount.table <- cbind(as.data.frame(ps.Silva.mer@refseq),t(ps.Silva.mer@otu_table),ps.Silva.mer@tax_table)
+write.csv(readcount.table, file = "absolutevalue_mer_2.csv")
+```
+
+relative counting
+```{r}
+ps.prop <- transform_sample_counts(ps.Silva.mer, function(otu) otu/sum(otu))
+readcount.table <- cbind(as.data.frame(ps.prop@refseq),t(ps.prop@otu_table),ps.prop@tax_table)
+write.csv(readcount.table, file = "relativevalue_mer_2.csv")
+```
+
+other things for import
+```{r}
+write.csv(ps.Silva.mer@tax_table, file = "dada2.Silva.taxtab.mer2.csv")
+write.csv(t(ps.Silva.mer@otu_table), file = "dada2.Silva.otutab.mer2.csv")
+writeXStringSet(ps.Silva.mer@refseq, filepath = "genera.norm2.fasta",  format="fasta")
+write.csv(readcount.table, file = "dada2.Silva.sumtab.mer2.csv")
+write.csv(core_com, "core_rel.csv")
+```
+
+and now importing all of it again here
+```{r}
+otu <- otu_table(as.matrix(read.csv(file = "dada2.Silva.otutab.mer2.csv", row.names = 1)), taxa_are_rows = TRUE)
+tax <- tax_table(as.matrix(read.csv(file = "dada2.Silva.taxtab.mer2.csv", row.names = 1)))
+seq <- readDNAStringSet(file = "genera.norm2.fasta", format = "fasta")
+```
+
+
+#Making phyloseq for analysis
+
+Make phyloseq for analysis and removing mitochondria 
+```{r}
+fin.phy1 <- phyloseq(otu_table = otu, tax_table = tax, seq, meta)
+
+physeq <- fin.phy1 %>% subset_taxa(Family!= "Mitochondria" | is.na(Family) & Order !="Chloroplast" | is.na(Order) )
+
+physeq@tax_table
+physeq <- fin.phy1 %>% subset_taxa(Family== "Mitochondria" | is.na(Family) & Order =="Chloroplast" | is.na(Order) )
+
+saveRDS(physeq, "no_chl.rds")
+```
+
+
+```{r}
+fin.phy <- readRDS("no_chl.rds")
+
+taxas1 <- core_members(fin.phy, detection = 4, prevalence = 5/100)
+fin.phy_1 <- prune_taxa(taxas1, fin.phy)
+
+saveRDS(fin.phy_1, "prev_all.rds") 
+fin.phy <- readRDS("prev_all.rds")
+
+tax_glom_fin.phy <- tax_glom(fin.phy, "Genus")
+```
+
+
+
+```{r}
+df <- data.frame(1,round(sample_sums(fin.phy_1)/sample_sums(fin.phy)*100))
+
+df2 <- aggregate(df$X1, by=list(df$round.sample_sums.fin.phy_1..sample_sums.fin.phy....100.),FUN=sum)
+
+remaining_count_reads <- ggplot(df2, aes(x=Group.1, y=x)) + 
+  geom_bar(stat = "identity", fill = "#0096C7") +
+  xlab("% remaining readings") + ylab("Number of samples") +
+  theme(axis.title = element_text(size = 25))
+
+remaining_count_reads
+```
+
+
+```{r}
+Dzinaga <- subset_samples(fin.phy, Place.whole == "Dzinaga")
+
+livv <- microbiome::transform(fin.phy, "compositional")  #Change the argument
+
+erie_bray <- phyloseq::distance(livv, method = "bray")
+#Make dataframe from sample data
+sampledf <- data.frame(sample_data(livv))
+
+#Count the homogeneous of variances (pv > 0.05 needed) 
+beta <- betadisper(erie_bray, sampledf$bee.gut) #Change the argument
+permutest(beta)
+
+#Count permanova (pv < 0.01 needed)
+permanova <- adonis2(erie_bray ~ bee.gut, data = sampledf) #Change the argument
+permanova
+
+#Calculate the ordination 
+ord.nmds.bray <- ordinate(livv, method="PCoA", distance="euclidean") #Change the arguments (method and distance)
+
+#Plot ordination
+plot_ordination_phyloseq <- plot_ordination(livv, ord.nmds.bray, color='bee.gut', title="Euclidean PCoA") + stat_ellipse(geom = "polygon", type="norm", alpha=0.01, aes(fill=bee.gut))
+
+a <- as.matrix(vegdist(t(ps2), method="euclidean"))
+?vegdist
+bray_distance <- pheatmap(a, cellwidth = 9, cellheight = 9, col = hcl.colors(50), fontsize_row = 8, 
+         fontsize_col = 8)
+
+```
+
+
+```{r}
+Dzinaga <- subset_samples(fin.phy, Place.whole == "Fiagdon")
+#Dzinaga <- subset_samples(Dzinaga, bee.gut == "gut")
+
+livv <- microbiome::transform(Dzinaga, "clr")  #Change the argument
+
+erie_bray <- phyloseq::distance(livv, method = "euclidean")
+#Make dataframe from sample data
+sampledf <- data.frame(sample_data(livv))
+
+#Count the homogeneous of variances (pv > 0.05 needed) 
+beta <- betadisper(erie_bray, sampledf$Hight) #Change the argument
+permutest(beta)
+
+#Count permanova (pv < 0.01 needed)
+permanova <- adonis2(erie_bray ~ Hight, data = sampledf) #Change the argument
+permanova
+
+#Calculate the ordination 
+ord.nmds.bray <- ordinate(livv, method="PCoA", distance="euclidean") #Change the arguments (method and distance)
+
+#Plot ordination
+plot_ordination_phyloseq <- plot_ordination(livv, ord.nmds.bray, color='Place', title="Euclidean PCoA",label="Place") + stat_ellipse(geom = "polygon", type="norm", alpha=0.01, aes(fill=Place))
+livv@sam_data
+a <- as.matrix(vegdist(t(ps2), method="euclidean"))
+?vegdist
+bray_distance <- pheatmap(a, cellwidth = 9, cellheight = 9, col = hcl.colors(50), fontsize_row = 8, 
+         fontsize_col = 8)
+
+```
+
+```{r}
+Dzinaga <- subset_samples(tax_glom_fin.phy, Place %in% c("D1", "D3", "F1", "F3"))
+#Dzinaga <- subset_samples(Dzinaga, bee.gut == "gut")
+
+livv <- microbiome::transform(Dzinaga, "clr")  #Change the argument
+
+erie_bray <- phyloseq::distance(livv, method = "euclidean")
+#Make dataframe from sample data
+sampledf <- data.frame(sample_data(livv))
+
+#Count the homogeneous of variances (pv > 0.05 needed) 
+beta <- betadisper(erie_bray, sampledf$Hight) #Change the argument
+permutest(beta)
+
+#Count permanova (pv < 0.01 needed)
+permanova <- adonis2(erie_bray ~ Hight, data = sampledf) #Change the argument
+permanova
+
+#Calculate the ordination 
+ord.nmds.bray <- ordinate(livv, method="PCoA", distance="euclidean") #Change the arguments (method and distance)
+?ordinate
+
+#Plot ordination
+plot_ordination_phyloseq <- plot_ordination(livv, ord.nmds.bray, color='Place', title="Euclidean PCoA",label="Place") + stat_ellipse(geom = "polygon", type="norm", alpha=0.01, aes(fill=Place))
+plot_ordination_phyloseq
+livv@sam_data
+a <- as.matrix(vegdist(t(ps2), method="euclidean"))
+?vegdist
+bray_distance <- pheatmap(a, cellwidth = 9, cellheight = 9, col = hcl.colors(50), fontsize_row = 8, 
+         fontsize_col = 8)
+```
+
+
+#Check the reason of difference
+```{r}
+taxa_name_func <- function(x) {paste0(x['ASV'], ' ph.', x['Phylum'], ' f.', x['Family'],  ' g.' , gsub('/', ' ', gsub("-", "", x['Genus'])), ' s.' , gsub('/', ' ', gsub("-", "", x['Species'])))}
+
+taxa_name_func <- function(x) {paste0(x['ASV'], ' ph.', x['Phylum'], ' f.', x['Family'],  ' g.' , gsub('/', ' ', gsub("-", "", x['Genus'])))}
+
+taxa_name_func <- function(x) {paste0('ph.', x['Phylum'], ' f.', x['Family'],  ' g.' , gsub('/', ' ', gsub("-", "", x['Genus'])))}
+
+pmerare_count_table <- function (ps_obj, taxa_name_func) {
+  otu_matrix <- as(otu_table(ps_obj), 'matrix')
+  taxa_matrix <- as(tax_table(ps_obj), 'matrix')
+  taxa_matrix <- cbind(ASV=rownames(taxa_matrix), taxa_matrix)  
+  taxa_matrix_good_names <- apply(taxa_matrix, MARGIN=1, taxa_name_func)
+  rownames(otu_matrix) <- taxa_matrix_good_names
+  return(otu_matrix)
+}
+```
+
+
+```{r}
+try <- subset_samples(tax_glom_fin.phy, Place %in% c("F1", "F3"))
+
+count_mtrx <- pmerare_count_table(fin.phy, taxa_name_func) #задаем то, что берется в функцию
+ps2 <- microbiome::transform(count_mtrx, "clr")
+? microbiome::transform
+```
+
+```{r}
+save_pheatmap_pdf <- function(x, filename, width=30, height=40) {
+  stopifnot(!missing(x))
+  stopifnot(!missing(filename))
+  pdf(filename, width=width, height=height)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+```
+
+
+```{r}
+readfile <- data.frame(tax_glom_fin.phy@sam_data)
+
+readfile <- select(readfile, bee.gut, Place)
+readfile$variable <- rownames(readfile)
+readfile
+```
+
+```{r}
+xx <- pheatmap(ps2, cellwidth = 2, cellheight = 2.5,
+         cluster_row = T,
+         cluster_cols = F,
+         show_rownames = T,
+         show_colnames = T,
+         fontsize_row = 2, 
+         fontsize_col = 2,
+         fontsize = 3, 
+         annotation_col = readfile,
+         clustering_distance_cols = "euclidean",
+         cutree_rows = 5,
+         angle_col = 315)
+?pheatmap
+#, cluster_cols = FALSE)
+#, gaps_col = seq(2,82,by=2))
+ggsave("all_all.pdf", xx, width = 7, height = 5)
+```
+
+
+# to 100% 
+```{r}
+vars <- 'Bifidobacterium|Gilliamella|Bartonella|Snodgrassella|Lactobacillus|Commensalibacter'
+core <- data.frame(count_mtrx[grepl(vars, rownames(count_mtrx)), ])
+
+core_com <- data.frame(microbiome::transform(core, "compositional"))
+core_com$bact <- rownames(core_com)
+
+```
+
+
+```{r}
+core_com
+df_long <- reshape2::melt(core_com)
+
+df_long <- merge(df_long, readfile, by = "variable", sort = F, all.x = T)
+```
+
+
+##DF VARIABLES
+Change tha dt for work
+```{r}
+df_long$variable <- gsub("16S.", "", df_long$variable)
+df_long$variable <- gsub(".R1.fastq.gz", "", df_long$variable)
+df_long$variable <- gsub("\\.", "_", df_long$variable)
+
+df_long$Genus <- gsub(".* g.", "", df_long$bact)
+df_long$Genus <- gsub("colSums.other.", "Other", df_long$Genus)
+
+df_long$ill_health <- gsub("F3|F2|D3|K1", "Sick", df_long$Place)
+df_long$ill_health <- gsub("D1|D2|F1", "Health", df_long$ill_health)
+
+df_long$ill <- gsub("F3", "Klebsiella", df_long$Place)
+df_long$ill <- gsub("D1|D2|F1", "Health", df_long$ill)
+df_long$ill <- gsub("K1", "Frischella", df_long$ill)
+df_long$ill <- gsub("F2", "Morganella|Pantoea", df_long$ill)
+df_long$ill <- gsub("D3", "Pantoea|Haffnia|Serrratia", df_long$ill)
+
+df_long$gorge <- gsub("K1", "Mamison gorge ", df_long$Place)
+df_long$gorge <- gsub("F", "Kurtatin gorge ", df_long$gorge)
+df_long$gorge <- gsub("D", "Digora gorge ", df_long$gorge)
+
+```
+
+
+
+```{r}
+plot <- ggplot(df_long, aes(x = variable, y = value)) +
+  geom_bar(aes(fill = Genus), stat = "identity", position = "fill") +
+  scale_fill_manual(values = colors)+
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  facet_grid(. ~ ill, scales="free", space="free_x")
+
+ggsave("rat_all_to_100.pdf", plot, width = 15, height = 15)
+```
+
+
+```{r}
+plot <- ggplot(df_long, aes(x=Genus, y=value, color=ill_health, fill=ill_health)) +
+  geom_boxplot(alpha=0.7) +
+  facet_wrap(. ~ Genus, scales="free") +
+  scale_fill_manual(values = colors)+
+  scale_color_manual(values = colors) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+ggsave("ill_to_health_sum.pdf", plot, width = 10, height = 6)
+```
+
+
+```{r}
+core_core <- data.frame(df_long[grepl('Bartonella|Lactobacillus', df_long$Genus), ])
+
+core_com <- data.frame(microbiome::transform(core_core, "compositional"))
+core_com$bact <- rownames(core_com)
+```
+
+```{r}
+core_com
+df_long <- reshape2::melt(core_com)
+
+df_long <- merge(df_long, readfile, by = "variable", sort = F, all.x = T)
+```
+
+```{r}
+plot <- ggplot(df_long, aes(x = variable, y = value)) +
+  geom_bar(aes(fill = bact), stat = "identity", position = "fill") +
+  scale_fill_manual(values = colors)+
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  facet_grid(. ~ Place, scales="free", space="free_x")
+
+ggsave("bart_lac.pdf", plot, width = 15, height = 15)
+```
+
+
+#ALL
+
+```{r}
+core_sum <- t(data.frame(colSums(core)))
+other <- count_mtrx[!rownames(count_mtrx) %in% rownames(core), ]
+other_sum <- t(data.frame(colSums(other)))
+
+all_sum <- rbind(core_sum, other_sum)
+rownames(all_sum) <- c("Core", "Other")
+write.csv(all_sum, "all_sum.csv")
+
+all <- rbind(core, other_sum)
+
+all_com <- data.frame(microbiome::transform(all, "compositional"))
+all_com$bact <- rownames(all_com)
+```
+
+```{r}
+all_com
+df_long <- reshape2::melt(all_com)
+
+df_long <- merge(df_long, readfile, by = "variable", sort = F, all.x = T)
+```
+
+```{r}
+unique(df_long$Genus)
+```
+
+
+```{r}
+plot <- df_long %>%
+  mutate(ill = fct_relevel(ill, 
+            "health", "Frischella", "Klebsiella", 
+            "Pantoea|Haffnia|Serrratia", "Morganella|Pantoea"), 
+         Genus = fct_relevel(Genus, 
+            "Gilliamella", "Bifidobacterium", "Bartonella", 
+            "Snodgrassella", "Lactobacillus", "Commensalibacter", "Other")) %>%
+  ggplot(aes(x = variable, y = value)) +
+  geom_bar(aes(fill = Genus), stat = "identity", position = "fill") +
+  scale_fill_manual(values = colors, labels = c("*Gilliamella*", "*Bifidobacterium*", "*Bartonella*", 
+            "*Snodgrassella*", "*Lactobacillus*", "*Commensalibacter*", "Other"))+
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  facet_grid(. ~ gorge, scales="free", space="free_x") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        legend.text = element_markdown(size = 12),
+        legend.title = element_markdown(size = 13))
+
+ggsave("rat_all_gorge.svg", plot, width = 14, height = 5)
+```
+
+
+# BEE VS GUT
+We can check that only on healthy bees, so we take bees from D1 and F1. Firstly because there is pretty much the same floral abundance on the polination aria  
+```{r}
+place <- subset_samples(fin.phy, Place == 'K1')
+
+ggsave("K1_bee_gut.pdf", plot_ordination_phyloseq, width = 15, height = 15)
+```
+
+They are different. So we can try to analyse only samples from gut with another samples from gut. Or we can try to understand where where the difference and mb can move bees data to gut data. 
+
+```{r}
+data@sam_data
+data <- tax_glom_fin.phy
+data <- subset_samples(data, Place %in% c("F1", "D1", "D2"))
+data <- subset_samples(tax_glom_fin.phy, Place %in% c("F3", "F2","K1", "D3"))
+data <- subset_samples(data, Sample.1 != 10)
+
+data_n <- data %>% subset_taxa(Genus %in% c("Bifidobacterium","Gilliamella","Bartonella",
+                                            "Snodgrassella","Lactobacillus","Commensalibacter"))
+data_n <- microbiome::transform(data_n, "compositional") 
+
+data_n <- data_n %>% subset_taxa(Genus %in% c("Gilliamella",
+                                  "Snodgrassella","Lactobacillus"))
+data_n@otu_table
+
+assign("var1", data.frame(sample_data(data_n))$Place)
+var2 <- "Place"
+
+new <- b_div(data_n, var1, var2)
+new
+colors <- c( "#EDDEA4","#F2BF8B","#BCD0AC","#B5E2FA")
+new
+
+ggsave("ord_bee_gut.png", new[[1]], width = 6, height = 5, dpi=300)
+
+```
+
+```{r}
+vars <- 'Bifidobacterium|Gilliamella|Bartonella|Snodgrassella|Lactobacillus|Commensalibacter'
+vars <- 'Bartonella|Snodgrassella'
+```
+
+
+```{r}
+prep_data <- function(data) {
+  #metadata
+  readfile <- data.frame(data@sam_data)
+  readfile <- select(readfile, bee.gut, Place)
+  readfile$variable <- rownames(readfile)
+  #data for analysis
+  count_mtrx <- data.frame(pmerare_count_table(data, taxa_name_func))
+  return(list(readfile, count_mtrx))
+}
+
+data_prep <- prep_data(tax_glom_fin.phy)
+
+core <- data.frame(data_prep[[2]][grepl(vars, rownames(data_prep[[2]])), ])
+core_com <- data.frame(microbiome::transform(core, "compositional"))
+core_com$bact <- rownames(core_com)
+
+
+df_long <- reshape2::melt(core_com)
+df_long <- merge(df_long, readfile, by = "variable", sort = F, all.x = T)
+
+df_long1 <- df_long["Place" %in% c("F1","D1","D2")]
+
+
+
+plot1 <- ggplot(df_long, aes(x = variable, y = value)) +
+  geom_bar(aes(fill = bact), stat = "identity", position = "fill") +
+  scale_fill_manual(values = colors)+
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  facet_grid(. ~ Place, scales="free", space="free_x")  +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+plot1
+ggsave("all_bar_snog_bar.png", plot1, width = 10, height = 5, dpi=300)
+
+
+core_core <- data.frame(df_long[grepl('F1|D1|D2', df_long$Place), ])
+plot2 <- core_core %>%
+  mutate(ill = fct_relevel(ill, 
+            "health", "Frischella", "Klebsiella", 
+            "Pantoea|Haffnia|Serrratia", "Morganella|Pantoea"), 
+         Genus = fct_relevel(Genus, 
+            "Gilliamella", "Snodgrassella", "Lactobacillus", 
+            "Bifidobacterium", "Bartonella", "Commensalibacter", "Other")) %>% ggplot( aes(x=Genus, y=value, color=gorge, fill=gorge)) +
+  geom_boxplot(alpha=0.7) +
+  facet_wrap(. ~ Genus, scales="free") +
+  scale_fill_manual(values = colors)+
+  scale_color_manual(values = colors) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+
+ggsave("ill_health_group_no_other.png", plot2, width = 7, height = 4, dpi=300)
+
+```
+
+
+```{r}
+core_core <- data.frame(df_long[grepl('Gilliamella|Snodgrassella', df_long$Genus), ])
+
+plot1 <- df_long %>%
+  mutate(ill = fct_relevel(ill, 
+            "health", "Frischella", "Klebsiella", 
+            "Pantoea|Haffnia|Serrratia", "Morganella|Pantoea"), 
+         Genus = fct_relevel(Genus, 
+            "Gilliamella", "Bifidobacterium", "Bartonella", 
+            "Snodgrassella", "Lactobacillus", "Commensalibacter", "Other")) %>% ggplot( aes(x = variable, y = value)) +
+  geom_bar(aes(fill = Genus), stat = "identity", position = "fill") +
+  scale_fill_manual(values = colors)+
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  facet_grid(. ~ ill, scales="free", space="free_x")  +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+ggsave("ill_health_group_no_other_to100.svg", plot1, width = 12, height = 5, dpi=300)
+
+
+library(tidyr)
+balance <- spread(select(core_core,Genus, value, variable), key = Genus, value = value)
+balance$bal <- balance$Bifidobacterium/balance$Lactobacillus
+
+
+
+```
+
+# pca with correlation
+```{r}
+library("FactoMineR")
+library("factoextra")
+
+pca_df <- data.frame(t(count_mtrx))
+class(pca_df)
+pca_df$variable <- rownames(pca_df)
+pca_df <- merge(pca_df, readfile, by = "variable", sort = F, all.x = T)
+
+colnames(pca_df) <- gsub(".*\\.g\\.", "", colnames(pca_df))
+
+pca_df$ill_health <- gsub("F3|F2|D3|K1", "ill", pca_df$Place)
+pca_df$ill_health <- gsub("D1|D2|F1", "health", pca_df$ill_health)
+
+# pca_df$ill <- gsub("F3", "Klebsiella", pca_df$Place)
+# pca_df$ill <- gsub("D1|D2|F1", "health", pca_df$ill)
+# pca_df$ill <- gsub("K1", "Frischella", pca_df$ill)
+# pca_df$ill <- gsub("F2", "Morganella|Pantoea", pca_df$ill)
+# pca_df$ill <- gsub("D3", "Pantoea|Haffnia|Serrratia", pca_df$ill)
+
+pca_df <- select(pca_df, -variable, -Place, -bee.gut)
+
+vars <- 'Bifidobacterium|Gilliamella|Bartonella|Snodgrassella|Lactobacillus|Commensalibacter|Klebsialla|Frischella|Pantoea|Haffnia|Serrratia|Pantoea|Morganella'
+vars <- c( "Bifidobacterium","Gilliamella","Bartonella","Snodgrassella","Lactobacillus","Commensalibacter","Klebsiella","Frischella","HafniaObesumbacterium","Serratia","Pantoea","Morganella", "ill_health")
+
+core_core <- data.frame(pca_df[,colnames(pca_df) %in% vars])
+
+iris.pca <- PCA(core_core[colnames(core_core)!= "ill_health"], graph = FALSE)
+
+cols_2 <- c("#0FA3B1","#FFB703")
+plot <- fviz_pca_biplot(iris.pca, 
+                col.ind = pca_df$ill_health, palette = cols_2, 
+                pointshape = 21, pointsize = 2,
+                addEllipses = TRUE, label = "var",
+                col.var = "#3A3A3A", repel = TRUE,
+                legend.title = "Health") 
+
+ggsave("correlated_pca.png", plot, width = 7, height = 5, dpi=300)
+plot
+```
+
+#alpha
+```{r}
+library(vegan)
+
+simp <- vegan::diversity(pca_df[colnames(pca_df)!= "ill_health"], index = "simpson")
+shan <- vegan::diversity(pca_df[colnames(pca_df)!= "ill_health"], index = "shannon")
+chao1 <- t(vegan::estimateR(pca_df[colnames(pca_df)!= "ill_health"], index = "chao"))[,"S.chao1"]
+
+alpha <- data.frame(cbind(simp, shan, chao1))
+rownames(alpha) <- readfile$variable
+
+
+df_long <- reshape2::melt(t(alpha))
+colnames(df_long) <- c("alpha","variable","value")
+
+plot2 <- ggplot(df_long, aes(x = ill_health, y = value, colour = ill_health)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.5) +
+  stat_compare_means(method = "t.test") +
+  facet_wrap(. ~ alpha, scales="free") +
+  scale_fill_manual(values = cols_2)+
+  scale_color_manual(values = cols_2) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  geom_jitter()
+
+plot2
+
+ggsave("alpha.svg", plot2, width = 6, height = 5, dpi=300)
+
+```
+
+# Kmeans searching the data
+
+```{r}
+# colnames(ps2) <- gsub("16S.", "", colnames(ps2))
+# colnames(ps2) <- gsub(".R1.fastq.gz", "", colnames(ps2))
+# colnames(ps2) <- gsub("Bee.", "", colnames(ps2))
+# colnames(ps2) <- gsub(".repl", "_r", colnames(ps2))
+cols_2 <- c("#0FA3B1","#FFB703")
+
+k_means_mat <- t(ps2) #transform
+k3 <- kmeans(k_means_mat, centers = 2, nstart = 1000)
+plot <- fviz_cluster(k3, data = k_means_mat, geom = c("point"), 
+                     ggtheme = theme_minimal()) + 
+  scale_fill_manual(values = cols_2) + 
+  scale_colour_manual(values = cols_2)
+plot
+?fviz_cluster
+
+ggsave("plot_clust_1.png", plot, width = 5, height = 5)
+```
+
+
+# Core and other box plot 
+
+```{r}
+all_sum <- read.csv("all_sum.csv", row.names = 1)
+rownames(all_sum) <- c("Core", "Other")
+
+all_sum_rel <- data.frame(microbiome::transform(all_sum, "compositional"))
+all_sum_rel$core <- rownames(all_sum_rel)
+df_long <- reshape2::melt(all_sum_rel)
+colnames(df_long) <- c("core", "variable", "value")
+
+df_long <- merge(df_long, readfile, by = "variable", sort = F, all.x = T)
+df_long$ill_health <- gsub("F3|F2|D3|K1", "Sick", df_long$Place)
+df_long$ill_health <- gsub("D1|D2|F1", "Health", df_long$ill_health)
+
+cols_2 <- c("#0FA3B1","#FFB703")
+
+plot2 <- df_long %>% ggplot( aes(x=ill_health, y=value, color=ill_health, fill=ill_health)) +
+  geom_boxplot(alpha=0.5) +
+  facet_wrap(. ~ core, scales="free") +
+  scale_fill_manual(values = cols_2)+
+  scale_color_manual(values = cols_2) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+plot2
+```
+
+
